@@ -23,6 +23,7 @@ from torch import nn
 
 from peft.tuners._buffer_dict import BufferDict
 from peft.tuners.lora.config import BdLoraConfig, MontecloraConfig
+from peft.tuners.lora.rowspace import computeWbarAndW2Naive
 from peft.utils.integrations import dequantize_module_weight, gather_params_ctx
 from peft.utils.other import infer_device, transpose
 
@@ -31,6 +32,7 @@ from .config import LoraConfig, PeftConfig
 from .dora import DoraConv1dLayer, DoraConv2dLayer, DoraConv3dLayer, DoraEmbeddingLayer, DoraLinearLayer
 from .layer import Conv1d, Conv2d, Conv3d, Embedding, Linear, LoraLayer, LoraVariant, _ConvNd
 from .monteclora import MontecloraSampler
+from .rowspace import computeWbarAndW2PivotedQR, computeWbarAndW2SVD
 from .velora import VeloraFunction, _get_group_dim, _normalize_projection, _reshape_to_grouped_subtokens
 
 
@@ -1592,3 +1594,183 @@ def _kasa_layer_regularization_loss(module: Linear, adapter_name: str, beta: flo
     l3 = torch.linalg.norm(gram_B - eye) + torch.linalg.norm(gram_A - eye)
 
     return beta * l2 + gamma * l3
+
+
+class RowSpaceLinearVariant(LoraVariant):
+    @staticmethod
+    def init(module: Linear, adapter_name: str, config: LoraConfig, **kwargs):
+        assert config.rowspace_config is not None
+        method = config.rowspace_config.split_method
+        module.split_method = method
+
+        n, m = module.weight.shape
+        # Square matrix side length, we only apply lora on this smaller matrix
+        square_side = min(n, m)
+        module.square_side = square_side
+
+        if n == m:
+            # RowSpace cannot work with square matrixes, fallback to already
+            # initialized LoRA adapter
+            return
+
+        if method == "naive":
+            naive_state = computeWbarAndW2Naive(module.weight)
+            module.register_buffer("W_bar", naive_state.W_bar)
+        elif method == "svd":
+            svd_state = computeWbarAndW2SVD(module.weight)
+            module.register_buffer("W2", svd_state.W2)
+            module.register_buffer("P", svd_state.P)
+        elif method == "pivotedQR":
+            pivotedQR_state = computeWbarAndW2PivotedQR(module.weight)
+            module.register_buffer("W2", pivotedQR_state.W2)
+            module.register_buffer("W_bar", pivotedQR_state.W_bar)
+            module.register_buffer("sel", pivotedQR_state.sel)
+            module.register_buffer("rest", pivotedQR_state.rest)
+            if n > m:
+                inv = torch.argsort(torch.cat([pivotedQR_state.sel, pivotedQR_state.rest]))
+                module.register_buffer("inv", inv)
+        else:
+            raise ValueError(f"Unkown rowspace split method: {method}")
+
+        # Assigning new LORA adapter, if square skip this
+        lora_a = module.lora_A[adapter_name]
+        lora_b = module.lora_B[adapter_name]
+        new_lora_a = nn.Linear(
+            square_side,
+            config.r,
+            bias=lora_a.bias is not None,
+            device=lora_a.weight.device,
+            dtype=lora_a.weight.dtype,
+        )
+        new_lora_b = nn.Linear(
+            config.r,
+            square_side,
+            bias=lora_b.bias is not None,
+            device=lora_b.weight.device,
+            dtype=lora_b.weight.dtype,
+        )
+
+        with torch.no_grad():
+            new_lora_a.weight.copy_(lora_a.weight[:, :square_side])
+            new_lora_b.weight.copy_(lora_b.weight[:square_side, :])
+            if lora_b.bias is not None:
+                new_lora_b.bias.copy_(lora_b.bias[:square_side])
+
+        module.lora_A[adapter_name] = new_lora_a
+        module.lora_B[adapter_name] = new_lora_b
+
+    @staticmethod
+    def _in_proj(module: Linear, method: str, x: torch.Tensor) -> torch.Tensor:
+        """Wide case (n < m): project input from m-dim to n-dim (square_side)."""
+        if method == "naive":
+            n, m = module.weight.shape
+            return F.linear(x[..., : m - n], module.W_bar) + x[..., m - n :]
+        elif method == "pivotedQR":
+            return x.index_select(-1, module.sel) + F.linear(x.index_select(-1, module.rest), module.W_bar)
+        elif method == "svd":
+            return F.linear(x, module.P)
+        else:
+            raise ValueError(f"Unknown rowspace split method: {method}")
+
+    @staticmethod
+    def _out_proj(module: Linear, method: str, h: torch.Tensor) -> torch.Tensor:
+        """Tall case (n > m): project output from m-dim (square_side) to n-dim."""
+        if method == "naive":
+            return torch.cat([F.linear(h, module.W_bar), h], dim=-1)
+        elif method == "pivotedQR":
+            return torch.cat([h, F.linear(h, module.W_bar)], dim=-1).index_select(-1, module.inv)
+        elif method == "svd":
+            return F.linear(h, module.P)
+        else:
+            raise ValueError(f"Unknown rowspace split method: {method}")
+
+    @staticmethod
+    def forward(
+        module: Linear,
+        active_adapter: str,
+        x: torch.Tensor,
+        result: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        lora_A = module.lora_A[active_adapter]
+        lora_B = module.lora_B[active_adapter]
+        dropout = module.lora_dropout[active_adapter]
+        scaling = module.scaling[active_adapter]
+
+        n, m = module.weight.shape
+        if n == m:
+            return result + lora_B(lora_A(dropout(x))) * scaling
+
+        method = module.split_method
+        if n < m:
+            x_proj = RowSpaceLinearVariant._in_proj(module, method, x)
+            result = result + lora_B(lora_A(dropout(x_proj))) * scaling
+        else:
+            delta_h = lora_B(lora_A(dropout(x))) * scaling
+            result = result + RowSpaceLinearVariant._out_proj(module, method, delta_h)
+        return result
+
+    @staticmethod
+    def _get_delta_weight(module: Linear, adapter: str) -> torch.Tensor:
+        """Compute the full (n, m) delta weight for the RowSpace adapter."""
+        device = module.lora_B[adapter].weight.device
+        dtype = module.lora_B[adapter].weight.dtype
+        cast_to_fp32 = device.type == "cpu" and (dtype == torch.float16 or dtype == torch.bfloat16)
+
+        weight_A = module.lora_A[adapter].weight
+        weight_B = module.lora_B[adapter].weight
+
+        if cast_to_fp32:
+            weight_A = weight_A.float()
+            weight_B = weight_B.float()
+
+        delta_square = (weight_B @ weight_A) * module.scaling[adapter]
+
+        n, m = module.weight.shape
+        if n == m:
+            output = transpose(delta_square, module.fan_in_fan_out)
+            return output.to(dtype) if cast_to_fp32 else output
+
+        method = module.split_method
+        if n < m:
+            if method == "naive":
+                delta_W = torch.zeros(n, m, dtype=delta_square.dtype, device=device)
+                delta_W[:, : m - n] = delta_square @ module.W_bar
+                delta_W[:, m - n :] = delta_square
+            elif method == "pivotedQR":
+                delta_W = torch.zeros(n, m, dtype=delta_square.dtype, device=device)
+                delta_W[:, module.rest] = delta_square @ module.W_bar
+                delta_W[:, module.sel] = delta_square
+            elif method == "svd":
+                delta_W = delta_square @ module.P
+        else:
+            if method == "naive":
+                delta_W = torch.zeros(n, m, dtype=delta_square.dtype, device=device)
+                delta_W[: n - m, :] = module.W_bar @ delta_square
+                delta_W[n - m :, :] = delta_square
+            elif method == "pivotedQR":
+                delta_W = torch.zeros(n, m, dtype=delta_square.dtype, device=device)
+                delta_W[module.rest, :] = module.W_bar @ delta_square
+                delta_W[module.sel, :] = delta_square
+            elif method == "svd":
+                delta_W = module.P @ delta_square
+
+        output = transpose(delta_W, module.fan_in_fan_out)
+        return output.to(dtype) if cast_to_fp32 else output
+
+    @staticmethod
+    def merge_safe(module: Linear, active_adapter: str, orig_weight: torch.Tensor) -> torch.Tensor:
+        orig_dtype = orig_weight.dtype
+        delta_weight = RowSpaceLinearVariant._get_delta_weight(module, active_adapter)
+        return orig_weight + delta_weight.to(orig_dtype)
+
+    @staticmethod
+    def merge_unsafe(module: Linear, active_adapter: str, orig_weight: torch.Tensor) -> None:
+        delta_weight = RowSpaceLinearVariant._get_delta_weight(module, active_adapter)
+        orig_weight.data += delta_weight.to(orig_weight.dtype)
+
+    @staticmethod
+    def unmerge(module: Linear, active_adapter: str, orig_weight: torch.Tensor) -> torch.Tensor:
+        orig_dtype = orig_weight.dtype
+        delta_weight = RowSpaceLinearVariant._get_delta_weight(module, active_adapter)
+        return orig_weight - delta_weight.to(orig_dtype)

@@ -511,6 +511,17 @@ class AstraConfig:
 
 
 @dataclass
+class RowSpaceConfig:
+    cache_folder: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": ("File to store the pivotted QR cache. The cache help recalculate the decomposition faster")
+        },
+    )
+    split_method: Literal["naive", "svd", "pivotedQR"] = "pivotedQR"
+
+
+@dataclass
 class LoraConfig(PeftConfig):
     """
     This is the configuration class to store the configuration of a [`LoraModel`].
@@ -689,11 +700,12 @@ class LoraConfig(PeftConfig):
             overheads in distributed settings.
         arrow_config (`Optional[ArrowConfig]`):
             The necessary config to apply arrow routing on the model.
-        ensure_weight_tying (`bool`, *optional*)
+        ensure_weight_tying (`bool`, *optional*):
             Whether to tie weights or not after peft initialization. This will ensure that the adapters added to the
             tied layers are also tied. This is only applicable for layers passed via `modules_to_save` and
             `target_modules`.
-
+        rowspace_config (`Optional[RowSpaceConfig]`):
+            Config for RowSpace
     """
 
     r: int = field(default=8, metadata={"help": "Lora attention dimension"})
@@ -1075,6 +1087,9 @@ class LoraConfig(PeftConfig):
                 "`modules_to_save`, `target_modules` and `trainable_token_indices`."
             )
         },
+    )
+    rowspace_config: Optional[RowSpaceConfig] = field(
+        default=None, metadata={"help": "Whether to use RowSpace or not", "is_lora_variant": True}
     )
 
     def to_dict(self):
