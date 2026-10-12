@@ -1602,7 +1602,6 @@ class RowSpaceLinearVariant(LoraVariant):
         assert config.rowspace_config is not None
         if isinstance(config.rowspace_config, dict):
             config.rowspace_config = RowSpaceConfig(**config.rowspace_config)
-        print(f"{config=}")
         method = config.rowspace_config.split_method
         module.split_method = method
 

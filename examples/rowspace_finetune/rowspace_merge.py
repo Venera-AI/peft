@@ -10,7 +10,7 @@ from peft import LoraModel, PeftModel
 def main(model_id: str, lora_path: str, output_path: str):
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype="float32",
+        dtype="float32",
         trust_remote_code=False,  # quantization_config=BitsAndBytesConfig(load_in_4bit=True)
     )
     model: LoraModel = PeftModel.from_pretrained(model, lora_path)
