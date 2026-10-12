@@ -1598,7 +1598,7 @@ def _kasa_layer_regularization_loss(module: Linear, adapter_name: str, beta: flo
 
 class RowSpaceLinearVariant(LoraVariant):
     @staticmethod
-    def init(module: Linear, adapter_name: str, config: LoraConfig, **kwargs):
+    def split_weight(module: nn.Module, config: LoraConfig):
         assert config.rowspace_config is not None
         method = config.rowspace_config.split_method
         module.split_method = method
@@ -1631,6 +1631,11 @@ class RowSpaceLinearVariant(LoraVariant):
                 module.register_buffer("inv", inv)
         else:
             raise ValueError(f"Unkown rowspace split method: {method}")
+
+    @staticmethod
+    def init(module: Linear, adapter_name: str, config: LoraConfig, **kwargs):
+        RowSpaceLinearVariant.split_weight(module, config)
+        square_side = min(module.weight.shape)
 
         # Assigning new LORA adapter, if square skip this
         lora_a = module.lora_A[adapter_name]
@@ -1711,18 +1716,14 @@ class RowSpaceLinearVariant(LoraVariant):
         return result
 
     @staticmethod
-    def _get_delta_weight(module: Linear, adapter: str) -> torch.Tensor:
-        """Compute the full (n, m) delta weight for the RowSpace adapter."""
+    def _compute_delta_weight(module, adapter: str, lora_A: torch.Tensor, lora_B: torch.Tensor):
         device = module.lora_B[adapter].weight.device
         dtype = module.lora_B[adapter].weight.dtype
         cast_to_fp32 = device.type == "cpu" and (dtype == torch.float16 or dtype == torch.bfloat16)
 
-        weight_A = module.lora_A[adapter].weight
-        weight_B = module.lora_B[adapter].weight
-
         if cast_to_fp32:
-            weight_A = weight_A.float()
-            weight_B = weight_B.float()
+            weight_A = lora_A.float()
+            weight_B = lora_B.float()
 
         delta_square = (weight_B @ weight_A) * module.scaling[adapter]
 
@@ -1759,6 +1760,14 @@ class RowSpaceLinearVariant(LoraVariant):
         return output.to(dtype) if cast_to_fp32 else output
 
     @staticmethod
+    def _get_delta_weight(module: Linear, adapter: str) -> torch.Tensor:
+        """Compute the full (n, m) delta weight for the RowSpace adapter."""
+        weight_A = module.lora_A[adapter].weight
+        weight_B = module.lora_B[adapter].weight
+
+        return RowSpaceLinearVariant._compute_delta_weight(module, adapter, weight_A, weight_B)
+
+    @staticmethod
     def merge_safe(module: Linear, active_adapter: str, orig_weight: torch.Tensor) -> torch.Tensor:
         orig_dtype = orig_weight.dtype
         delta_weight = RowSpaceLinearVariant._get_delta_weight(module, active_adapter)
@@ -1773,4 +1782,75 @@ class RowSpaceLinearVariant(LoraVariant):
     def unmerge(module: Linear, active_adapter: str, orig_weight: torch.Tensor) -> torch.Tensor:
         orig_dtype = orig_weight.dtype
         delta_weight = RowSpaceLinearVariant._get_delta_weight(module, active_adapter)
+        return orig_weight - delta_weight.to(orig_dtype)
+
+
+class RowSpaceEmbeddingVariant(LoraVariant):
+    @staticmethod
+    def init(module: Embedding, adapter_name: str, config: LoraConfig, **kwargs):
+        RowSpaceLinearVariant.split_weight(module, config)
+        square_side = min(module.weight.shape)
+        old_A = module.lora_embedding_A[adapter_name]
+        old_B = module.lora_embedding_B[adapter_name]
+
+        new_A = nn.Parameter(torch.empty(config.r, square_side, dtype=old_A.dtype, device=old_A.device))
+        new_B = nn.Parameter(torch.empty(square_side, config.r, dtype=old_B.dtype, device=old_B.device))
+
+        with torch.no_grad():
+            new_A.copy_(old_A[:, :square_side])
+            new_B.copy_(old_B[:square_side, :])
+
+        module.lora_embedding_A[adapter_name] = new_A
+        module.lora_embedding_B[adapter_name] = new_B
+
+    @staticmethod
+    def _get_delta_weight(module: Embedding, adapter: str) -> torch.Tensor:
+        """Compute the full (num_embeddings, embedding_dim) delta weight."""
+        lora_A = module.lora_embedding_A[adapter]
+        lora_B = module.lora_embedding_B[adapter]
+
+        return RowSpaceLinearVariant._compute_delta_weight(module, adapter, lora_A, lora_B)
+
+    @staticmethod
+    def forward(
+        module: Embedding,
+        active_adapter: str,
+        x: torch.Tensor,
+        result: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        base_weight = module.get_base_layer().weight
+        n, m = base_weight.shape
+        scaling = module.scaling[active_adapter]
+
+        if n == m:
+            embedding_A = module.lora_embedding_A[active_adapter].T
+            embedding_B = module.lora_embedding_B[active_adapter].T
+            after_A = module._embed(x, embedding_A)
+            adapter_output = (after_A @ embedding_B) * scaling
+        else:
+            delta_W = RowSpaceEmbeddingVariant._get_delta_weight(module, active_adapter)
+            adapter_output = module._embed(x, delta_W)
+
+        embed_scale = module._get_embed_scale()
+        if embed_scale is not None:
+            adapter_output = adapter_output * embed_scale.to(adapter_output.dtype)
+
+        return result + adapter_output
+
+    @staticmethod
+    def merge_safe(module: Embedding, active_adapter: str, orig_weight: torch.Tensor) -> torch.Tensor:
+        orig_dtype = orig_weight.dtype
+        delta_weight = RowSpaceEmbeddingVariant._get_delta_weight(module, active_adapter)
+        return orig_weight + delta_weight.to(orig_dtype)
+
+    @staticmethod
+    def merge_unsafe(module: Embedding, active_adapter: str, orig_weight: torch.Tensor) -> None:
+        delta_weight = RowSpaceEmbeddingVariant._get_delta_weight(module, active_adapter)
+        orig_weight.data += delta_weight.to(orig_weight.dtype)
+
+    @staticmethod
+    def unmerge(module: Embedding, active_adapter: str, orig_weight: torch.Tensor) -> torch.Tensor:
+        orig_dtype = orig_weight.dtype
+        delta_weight = RowSpaceEmbeddingVariant._get_delta_weight(module, active_adapter)
         return orig_weight - delta_weight.to(orig_dtype)
