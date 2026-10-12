@@ -21,7 +21,7 @@ from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.pytorch_utils import Conv1D
 
-from peft import KasaConfig, LoraConfig, TaskType, get_peft_model
+from peft import KasaConfig, LoraConfig, RowSpaceConfig, TaskType, get_peft_model
 from peft.tuners.lora.layer import Conv1d as LoraConv1d
 from peft.tuners.lora.layer import Conv2d as LoraConv2d
 from peft.tuners.lora.layer import Embedding as LoraEmbedding
@@ -34,6 +34,8 @@ from peft.tuners.lora.variants import (
     DoraEmbeddingVariant,
     DoraLinearVariant,
     KasaLinearVariant,
+    RowSpaceEmbeddingVariant,
+    RowSpaceLinearVariant,
     calculate_alora_offsets,
     get_alora_offsets_for_forward,
     get_alora_offsets_for_generate,
@@ -130,6 +132,10 @@ VARIANT_MAP = {
     "kasa": {
         LoraLinear: KasaLinearVariant,
     },
+    "rowspace": {
+        LoraLinear: RowSpaceLinearVariant,
+        LoraEmbedding: RowSpaceEmbeddingVariant,
+    },
 }
 
 
@@ -148,6 +154,25 @@ TEST_CASES = [
         "kasa",
         LoraConfig,
         {"target_modules": ["linear1", "linear2"], "kasa_config": KasaConfig(), "r": 4},
+    ),
+    (
+        "rowspace",
+        LoraConfig,
+        {"target_modules": ["linear1", "linear2"], "rowspace_config": RowSpaceConfig(split_method="naive"), "r": 4},
+    ),
+    (
+        "rowspace",
+        LoraConfig,
+        {"target_modules": ["linear1", "linear2"], "rowspace_config": RowSpaceConfig(split_method="svd"), "r": 4},
+    ),
+    (
+        "rowspace",
+        LoraConfig,
+        {
+            "target_modules": ["linear1", "linear2"],
+            "rowspace_config": RowSpaceConfig(split_method="pivotedQR"),
+            "r": 4,
+        },
     ),
 ]
 

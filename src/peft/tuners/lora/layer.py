@@ -1275,6 +1275,7 @@ class Embedding(nn.Module, LoraLayer):
             (): None,
             ("use_dora",): variants.DoraEmbeddingVariant,
             ("mica",): variants.MiCAEmbeddingVariant,
+            ("rowspace_config",): variants.RowSpaceEmbeddingVariant,
         }
 
     def update_layer(
@@ -1632,6 +1633,8 @@ class _ConvNd(nn.Module, LoraLayer):
             raise ValueError("aLoRA does not support adapting conv layers.")
         if config.velora_config is not None:
             raise ValueError("VeLoRA does not support adapting conv layers.")
+        if config.rowspace_config is not None:
+            raise ValueError("RowSpace does not support adapting conv layers.")
         if base_layer.groups > 1:
             warnings.warn("LoRA adapter added to ConvNd layer with groups > 1. Merging is not supported.")
 

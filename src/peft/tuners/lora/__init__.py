@@ -28,6 +28,7 @@ from .config import (
     LoraGAConfig,
     LoraRuntimeConfig,
     MontecloraConfig,
+    RowSpaceConfig,
     VeloraConfig,
 )
 from .conversion import convert_to_lora, save_as_lora
@@ -57,6 +58,7 @@ __all__ = [
     "LoraRuntimeConfig",
     "MontecloraConfig",
     "ParamWrapper",
+    "RowSpaceConfig",
     "VeloraConfig",
     "convert_to_lora",
     "create_arrow_model",

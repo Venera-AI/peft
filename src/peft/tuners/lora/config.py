@@ -512,13 +512,13 @@ class AstraConfig:
 
 @dataclass
 class RowSpaceConfig:
+    split_method: Literal["naive", "svd", "pivotedQR"] = "pivotedQR"
     cache_folder: Optional[str] = field(
         default=None,
         metadata={
             "help": ("File to store the pivotted QR cache. The cache help recalculate the decomposition faster")
         },
     )
-    split_method: Literal["naive", "svd", "pivotedQR"] = "pivotedQR"
 
 
 @dataclass
