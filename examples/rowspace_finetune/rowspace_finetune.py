@@ -1,3 +1,5 @@
+import argparse
+
 from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
@@ -70,4 +72,9 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="LiquidAI/LFM2.5-230M", required=False, type=str)
+    parser.add_argument("--tokenizer", default=None, required=False, type=str)
+    parser.add_argument("--split_method", default="naive", required=False, type=str)
+    args = parser.parse_args()
+    main(args.model, args.tokenizer, args.split_method)

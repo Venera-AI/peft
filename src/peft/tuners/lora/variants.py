@@ -28,7 +28,7 @@ from peft.utils.integrations import dequantize_module_weight, gather_params_ctx
 from peft.utils.other import infer_device, transpose
 
 from .arrow import ArrowLoraLinearLayer
-from .config import LoraConfig, PeftConfig
+from .config import LoraConfig, PeftConfig, RowSpaceConfig
 from .dora import DoraConv1dLayer, DoraConv2dLayer, DoraConv3dLayer, DoraEmbeddingLayer, DoraLinearLayer
 from .layer import Conv1d, Conv2d, Conv3d, Embedding, Linear, LoraLayer, LoraVariant, _ConvNd
 from .monteclora import MontecloraSampler
@@ -1600,6 +1600,9 @@ class RowSpaceLinearVariant(LoraVariant):
     @staticmethod
     def split_weight(module: nn.Module, config: LoraConfig):
         assert config.rowspace_config is not None
+        if isinstance(config.rowspace_config, dict):
+            config.rowspace_config = RowSpaceConfig(**config.rowspace_config)
+        print(f"{config=}")
         method = config.rowspace_config.split_method
         module.split_method = method
 
@@ -1615,20 +1618,20 @@ class RowSpaceLinearVariant(LoraVariant):
 
         if method == "naive":
             naive_state = computeWbarAndW2Naive(module.weight)
-            module.register_buffer("W_bar", naive_state.W_bar)
+            module.register_buffer("W_bar", naive_state.W_bar, persistent=False)
         elif method == "svd":
             svd_state = computeWbarAndW2SVD(module.weight)
-            module.register_buffer("W2", svd_state.W2)
-            module.register_buffer("P", svd_state.P)
+            module.register_buffer("W2", svd_state.W2, persistent=False)
+            module.register_buffer("P", svd_state.P, persistent=False)
         elif method == "pivotedQR":
             pivotedQR_state = computeWbarAndW2PivotedQR(module.weight)
-            module.register_buffer("W2", pivotedQR_state.W2)
-            module.register_buffer("W_bar", pivotedQR_state.W_bar)
-            module.register_buffer("sel", pivotedQR_state.sel)
-            module.register_buffer("rest", pivotedQR_state.rest)
+            module.register_buffer("W2", pivotedQR_state.W2, persistent=False)
+            module.register_buffer("W_bar", pivotedQR_state.W_bar, persistent=False)
+            module.register_buffer("sel", pivotedQR_state.sel, persistent=False)
+            module.register_buffer("rest", pivotedQR_state.rest, persistent=False)
             if n > m:
                 inv = torch.argsort(torch.cat([pivotedQR_state.sel, pivotedQR_state.rest]))
-                module.register_buffer("inv", inv)
+                module.register_buffer("inv", inv, persistent=False)
         else:
             raise ValueError(f"Unkown rowspace split method: {method}")
 
@@ -1722,10 +1725,10 @@ class RowSpaceLinearVariant(LoraVariant):
         cast_to_fp32 = device.type == "cpu" and (dtype == torch.float16 or dtype == torch.bfloat16)
 
         if cast_to_fp32:
-            weight_A = lora_A.float()
-            weight_B = lora_B.float()
+            lora_A = lora_A.float()
+            lora_B = lora_B.float()
 
-        delta_square = (weight_B @ weight_A) * module.scaling[adapter]
+        delta_square = (lora_B @ lora_A) * module.scaling[adapter]
 
         n, m = module.weight.shape
         if n == m:
