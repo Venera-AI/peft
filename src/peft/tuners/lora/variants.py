@@ -1616,14 +1616,14 @@ class RowSpaceLinearVariant(LoraVariant):
             return
 
         if method == "naive":
-            naive_state = computeWbarAndW2Naive(module.weight)
+            naive_state = computeWbarAndW2Naive(module.get_base_weight())
             module.register_buffer("W_bar", naive_state.W_bar, persistent=False)
         elif method == "svd":
-            svd_state = computeWbarAndW2SVD(module.weight)
+            svd_state = computeWbarAndW2SVD(module.get_base_weight())
             module.register_buffer("W2", svd_state.W2, persistent=False)
             module.register_buffer("P", svd_state.P, persistent=False)
         elif method == "pivotedQR":
-            pivotedQR_state = computeWbarAndW2PivotedQR(module.weight)
+            pivotedQR_state = computeWbarAndW2PivotedQR(module.get_base_weight())
             module.register_buffer("W2", pivotedQR_state.W2, persistent=False)
             module.register_buffer("W_bar", pivotedQR_state.W_bar, persistent=False)
             module.register_buffer("sel", pivotedQR_state.sel, persistent=False)
