@@ -9,7 +9,7 @@ from transformers import (
     TrainingArguments,
 )
 
-from peft import LoraConfig, PeftType, RowSpaceConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, PeftType, RowSpaceConfig, TaskType, get_peft_model
 
 
 def main(
@@ -20,9 +20,11 @@ def main(
 ):
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        trust_remote_code=False,  # quantization_config=BitsAndBytesConfig(load_in_4bit=True)
+        trust_remote_code=False,
+        dtype="float32",
+        device_map="auto",
     )
-    prepare_model_for_kbit_training(model)
+
     if tokenizer_id is None:
         tokenizer_id = model_id
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
@@ -33,12 +35,23 @@ def main(
             TaskType.CAUSAL_LM,
             PeftType.LORA,
             r=rank,
-            rowspace_config=RowSpaceConfig(split_method=rowspace_split_method),
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj", "embedding"],
+            rowspace_config=RowSpaceConfig(split_method=rowspace_split_method)
+            if rowspace_split_method != "lora"
+            else None,
+            target_modules=[
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+                "embedding",
+            ],
         ),
     )
 
-    dataset = load_dataset("openai/gsm8k", "main", split="train[:64]")
+    dataset = load_dataset("openai/gsm8k", "main", split="train[:6400]")
 
     def tokenize(examples: dict[str, str]):
         inputs = tokenizer.apply_chat_template(
@@ -60,15 +73,17 @@ def main(
     trainer = Trainer(
         model,
         TrainingArguments(
+            output_dir=rowspace_split_method,
             per_device_train_batch_size=8,
             optim="adamw_torch_fused",
             num_train_epochs=1,
+            max_steps=100,
         ),
         data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True, max_length=8196, return_tensors="pt"),
         train_dataset=tokenized_dataset,
     )
     output = trainer.train()
-    print(f"Train output: {output}")
+    print(f"Train output [{rowspace_split_method}] {output}")
 
 
 if __name__ == "__main__":
