@@ -1616,7 +1616,7 @@ class RowSpaceLinearVariant(LoraVariant):
         return module.get_base_weight()
 
     @staticmethod
-    def split_weight(module: nn.Module, config: LoraConfig):
+    def split_weight(module: nn.Module, config: LoraConfig, dtype: torch.dtype | None = None):
         assert config.rowspace_config is not None
         if isinstance(config.rowspace_config, dict):
             config.rowspace_config = RowSpaceConfig(**config.rowspace_config)
@@ -1633,17 +1633,20 @@ class RowSpaceLinearVariant(LoraVariant):
             # initialized LoRA adapter
             return
 
+        def _buf(t: torch.Tensor) -> torch.Tensor:
+            return t if dtype is None else t.to(dtype)
+
         if method == "naive":
             naive_state = computeWbarAndW2Naive(RowSpaceLinearVariant._get_base_weight(module))
-            module.register_buffer("W_bar", naive_state.W_bar, persistent=False)
+            module.register_buffer("W_bar", _buf(naive_state.W_bar), persistent=False)
         elif method == "svd":
             svd_state = computeWbarAndW2SVD(RowSpaceLinearVariant._get_base_weight(module))
-            module.register_buffer("W2", svd_state.W2, persistent=False)
-            module.register_buffer("P", svd_state.P, persistent=False)
+            module.register_buffer("W2", _buf(svd_state.W2), persistent=False)
+            module.register_buffer("P", _buf(svd_state.P), persistent=False)
         elif method == "pivotedQR":
             pivotedQR_state = computeWbarAndW2PivotedQR(RowSpaceLinearVariant._get_base_weight(module))
-            module.register_buffer("W2", pivotedQR_state.W2, persistent=False)
-            module.register_buffer("W_bar", pivotedQR_state.W_bar, persistent=False)
+            module.register_buffer("W2", _buf(pivotedQR_state.W2), persistent=False)
+            module.register_buffer("W_bar", _buf(pivotedQR_state.W_bar), persistent=False)
             module.register_buffer("sel", pivotedQR_state.sel, persistent=False)
             module.register_buffer("rest", pivotedQR_state.rest, persistent=False)
             if n > m:
@@ -1654,12 +1657,12 @@ class RowSpaceLinearVariant(LoraVariant):
 
     @staticmethod
     def init(module: Linear, adapter_name: str, config: LoraConfig, **kwargs):
-        RowSpaceLinearVariant.split_weight(module, config)
+        lora_a = module.lora_A[adapter_name]
+        lora_b = module.lora_B[adapter_name]
+        RowSpaceLinearVariant.split_weight(module, config, dtype=lora_a.weight.dtype)
         square_side = min(RowSpaceLinearVariant._weight_shape(module))
 
         # Assigning new LORA adapter, if square skip this
-        lora_a = module.lora_A[adapter_name]
-        lora_b = module.lora_B[adapter_name]
         new_lora_a = nn.Linear(
             square_side,
             config.r,
@@ -1808,9 +1811,9 @@ class RowSpaceLinearVariant(LoraVariant):
 class RowSpaceEmbeddingVariant(LoraVariant):
     @staticmethod
     def init(module: Embedding, adapter_name: str, config: LoraConfig, **kwargs):
-        RowSpaceLinearVariant.split_weight(module, config)
-        square_side = min(module.weight.shape)
         old_A = module.lora_embedding_A[adapter_name]
+        RowSpaceLinearVariant.split_weight(module, config, dtype=old_A.dtype)
+        square_side = min(module.weight.shape)
         old_B = module.lora_embedding_B[adapter_name]
 
         new_A = nn.Parameter(torch.empty(config.r, square_side, dtype=old_A.dtype, device=old_A.device))
