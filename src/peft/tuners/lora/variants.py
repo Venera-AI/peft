@@ -1598,6 +1598,24 @@ def _kasa_layer_regularization_loss(module: Linear, adapter_name: str, beta: flo
 
 class RowSpaceLinearVariant(LoraVariant):
     @staticmethod
+    def _weight_shape(module) -> tuple[int, int]:
+        """Return (out_features, in_features), handling quantized layers whose .weight.shape is packed."""
+        base = module.get_base_layer()
+        return (base.out_features, base.in_features)
+
+    @staticmethod
+    def _get_base_weight(module) -> torch.Tensor:
+        """Return the dequantized base weight, handling bnb quantized layers."""
+        from peft.utils.integrations import dequantize_bnb_weight
+
+        weight = module.get_base_layer().weight
+        if hasattr(weight, "quant_state"):
+            return dequantize_bnb_weight(weight, state=weight.quant_state)
+        if hasattr(module.get_base_layer(), "state"):
+            return dequantize_bnb_weight(weight, state=module.get_base_layer().state)
+        return module.get_base_weight()
+
+    @staticmethod
     def split_weight(module: nn.Module, config: LoraConfig):
         assert config.rowspace_config is not None
         if isinstance(config.rowspace_config, dict):
@@ -1605,7 +1623,7 @@ class RowSpaceLinearVariant(LoraVariant):
         method = config.rowspace_config.split_method
         module.split_method = method
 
-        n, m = module.weight.shape
+        n, m = RowSpaceLinearVariant._weight_shape(module)
         # Square matrix side length, we only apply lora on this smaller matrix
         square_side = min(n, m)
         module.square_side = square_side
@@ -1616,14 +1634,14 @@ class RowSpaceLinearVariant(LoraVariant):
             return
 
         if method == "naive":
-            naive_state = computeWbarAndW2Naive(module.get_base_weight())
+            naive_state = computeWbarAndW2Naive(RowSpaceLinearVariant._get_base_weight(module))
             module.register_buffer("W_bar", naive_state.W_bar, persistent=False)
         elif method == "svd":
-            svd_state = computeWbarAndW2SVD(module.get_base_weight())
+            svd_state = computeWbarAndW2SVD(RowSpaceLinearVariant._get_base_weight(module))
             module.register_buffer("W2", svd_state.W2, persistent=False)
             module.register_buffer("P", svd_state.P, persistent=False)
         elif method == "pivotedQR":
-            pivotedQR_state = computeWbarAndW2PivotedQR(module.get_base_weight())
+            pivotedQR_state = computeWbarAndW2PivotedQR(RowSpaceLinearVariant._get_base_weight(module))
             module.register_buffer("W2", pivotedQR_state.W2, persistent=False)
             module.register_buffer("W_bar", pivotedQR_state.W_bar, persistent=False)
             module.register_buffer("sel", pivotedQR_state.sel, persistent=False)
@@ -1637,7 +1655,7 @@ class RowSpaceLinearVariant(LoraVariant):
     @staticmethod
     def init(module: Linear, adapter_name: str, config: LoraConfig, **kwargs):
         RowSpaceLinearVariant.split_weight(module, config)
-        square_side = min(module.weight.shape)
+        square_side = min(RowSpaceLinearVariant._weight_shape(module))
 
         # Assigning new LORA adapter, if square skip this
         lora_a = module.lora_A[adapter_name]
@@ -1670,7 +1688,7 @@ class RowSpaceLinearVariant(LoraVariant):
     def _in_proj(module: Linear, method: str, x: torch.Tensor) -> torch.Tensor:
         """Wide case (n < m): project input from m-dim to n-dim (square_side)."""
         if method == "naive":
-            n, m = module.weight.shape
+            n, m = RowSpaceLinearVariant._weight_shape(module)
             return F.linear(x[..., : m - n], module.W_bar) + x[..., m - n :]
         elif method == "pivotedQR":
             return x.index_select(-1, module.sel) + F.linear(x.index_select(-1, module.rest), module.W_bar)
@@ -1704,7 +1722,7 @@ class RowSpaceLinearVariant(LoraVariant):
         dropout = module.lora_dropout[active_adapter]
         scaling = module.scaling[active_adapter]
 
-        n, m = module.weight.shape
+        n, m = RowSpaceLinearVariant._weight_shape(module)
         if n == m:
             return result + lora_B(lora_A(dropout(x))) * scaling
 
@@ -1729,7 +1747,7 @@ class RowSpaceLinearVariant(LoraVariant):
 
         delta_square = (lora_B @ lora_A) * module.scaling[adapter]
 
-        n, m = module.weight.shape
+        n, m = RowSpaceLinearVariant._weight_shape(module)
         if n == m:
             output = transpose(delta_square, module.fan_in_fan_out)
             return output.to(dtype) if cast_to_fp32 else output

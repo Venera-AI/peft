@@ -25,24 +25,27 @@ def computeWbarAndW2PivotedQR(matrix: torch.Tensor, cache_path: str | None = Non
     if n == m:
         return None
 
+    orig_dtype = matrix.dtype
+    if matrix.dtype != torch.float32:
+        matrix = matrix.float()
+
     def computeWbarAndW2Wide(matrix: torch.Tensor) -> PivotedQRState | None:
         from scipy.linalg import qr
 
         k = matrix.shape[0]
-        orig_dtype = matrix.dtype
         orig_device = matrix.device
         W = matrix.detach().cpu().numpy()
 
         R, P = qr(W, pivoting=True, mode="r")
-        R = torch.as_tensor(R, dtype=orig_dtype)
+        R = torch.as_tensor(R, dtype=torch.float32)
         P = torch.as_tensor(P, dtype=torch.long)
         R11 = R[:, :k]
         W_bar = torch.linalg.solve_triangular(R11, R[:, k:], upper=True)
 
         return PivotedQRState(
             type="pivotedQR",
-            W2=matrix[:, P[:k]].contiguous(),
-            W_bar=W_bar.to(device=orig_device).contiguous(),
+            W2=matrix[:, P[:k]].to(orig_dtype).contiguous(),
+            W_bar=W_bar.to(dtype=orig_dtype, device=orig_device).contiguous(),
             sel=P[:k].to(device=orig_device).contiguous(),
             rest=P[k:].to(device=orig_device).contiguous(),
         )
@@ -64,7 +67,7 @@ def computeWbarAndW2PivotedQR(matrix: torch.Tensor, cache_path: str | None = Non
         else:
             W2 = matrix[sel, :].contiguous()
             X = torch.linalg.solve(W2.T, matrix[rest, :].T).T
-        return PivotedQRState("pivotedQR", W2, X, torch.tensor(sel), torch.tensor(rest))
+        return PivotedQRState("pivotedQR", W2.to(orig_dtype), X.to(orig_dtype), torch.tensor(sel), torch.tensor(rest))
 
     # Build from scratch
     if n < m:
@@ -98,12 +101,15 @@ def computeWbarAndW2SVD(matrix: torch.Tensor) -> SVDState | None:
     n, m = matrix.shape
     if n == m:
         return None
+    orig_dtype = matrix.dtype
+    if matrix.dtype != torch.float32:
+        matrix = matrix.float()
     if n < m:
         U, S, Vh = torch.linalg.svd(matrix, full_matrices=False)
-        return SVDState(type="SVD", W2=U * S, P=Vh)
+        return SVDState(type="SVD", W2=(U * S).to(orig_dtype), P=Vh.to(orig_dtype))
     else:
         U, S, Vh = torch.linalg.svd(matrix, full_matrices=False)
-        return SVDState(type="SVD", W2=S[:, None] * Vh, P=U)
+        return SVDState(type="SVD", W2=(S[:, None] * Vh).to(orig_dtype), P=U.to(orig_dtype))
 
 
 @dataclass
@@ -117,6 +123,9 @@ def computeWbarAndW2Naive(matrix: torch.Tensor) -> NaiveState | None:
     n, m = matrix.shape
     if n == m:
         return None
+    orig_dtype = matrix.dtype
+    if matrix.dtype != torch.float32:
+        matrix = matrix.float()
     if n < m:
         W1 = matrix[:, : m - n]
         W2 = matrix[:, m - n :]
@@ -125,7 +134,7 @@ def computeWbarAndW2Naive(matrix: torch.Tensor) -> NaiveState | None:
         W1 = matrix[: n - m, :]
         W2 = matrix[n - m :, :]
         W_bar = torch.linalg.solve(W2.T, W1.T).T
-    return NaiveState("naive", W2, W_bar)
+    return NaiveState("naive", W2.to(orig_dtype), W_bar.to(orig_dtype))
 
 
 def forwardNaive(state: NaiveState, lora_A: nn.Linear, lora_B: nn.Linear, x: torch.Tensor) -> torch.Tensor:

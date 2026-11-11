@@ -63,6 +63,11 @@ if is_bnb_available():
 
                 return ArrowLinearVariant()
 
+            if config.rowspace_config is not None:
+                from .variants import RowSpaceLinearVariant
+
+                return RowSpaceLinearVariant()
+
             use_alora = config.alora_invocation_tokens is not None
             if not config.use_dora and not use_alora:
                 return None
@@ -340,6 +345,11 @@ if is_bnb_4bit_available():
                 from .variants import ArrowLinearVariant
 
                 return ArrowLinearVariant()
+
+            if config.rowspace_config is not None:
+                from .variants import RowSpaceLinearVariant
+
+                return RowSpaceLinearVariant()
 
             use_alora = config.alora_invocation_tokens is not None
             if not config.use_dora and not use_alora:
