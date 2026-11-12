@@ -129,11 +129,11 @@ def computeWbarAndW2Naive(matrix: torch.Tensor) -> NaiveState | None:
     if n < m:
         W1 = matrix[:, : m - n]
         W2 = matrix[:, m - n :]
-        W_bar = torch.linalg.solve(W2, W1)
+        W_bar = torch.linalg.pinv(W2) @ W1
     else:
         W1 = matrix[: n - m, :]
         W2 = matrix[n - m :, :]
-        W_bar = torch.linalg.solve(W2.T, W1.T).T
+        W_bar = W1 @ torch.linalg.pinv(W2)
     return NaiveState("naive", W2.to(orig_dtype), W_bar.to(orig_dtype))
 
 
